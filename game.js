@@ -1,51 +1,45 @@
-// game.js — base v2: 월드/건물/문 + 컨테이너 스폰 + 루팅 UI + 인벤토리 + WASD
+// game.js — Full-res (pre-optimization) build
+// 월드/건물/문/실내-외 오버레이(채도 0.5, 2초 페이드) + 컨테이너 스폰 + 루팅 UI + 힌트
+
 export function start(canvas) {
   const d = document, w = window;
   const ctx = canvas.getContext('2d', { alpha: false });
-  let DPR = Math.max(1, Math.min(2, w.devicePixelRatio || 1));
-  let DRS = 1, MAXP = 2.2e6;
 
+  // === View / DPI ===
+  let DPR = Math.max(1, Math.min(2, w.devicePixelRatio || 1));
   function resize() {
     DPR = Math.max(1, Math.min(2, w.devicePixelRatio || 1));
-    let tw = Math.floor(w.innerWidth * DPR);
-    let th = Math.floor(w.innerHeight * DPR);
-    DRS = 1;
-    const px = tw * th;
-    if (px > MAXP) {
-      const s = Math.sqrt(MAXP / px);
-      DRS = Math.max(.5, Math.min(1, s));
-      tw = Math.max(1, Math.floor(tw * DRS));
-      th = Math.max(1, Math.floor(th * DRS));
-    }
-    canvas.width = tw; canvas.height = th;
-    canvas.style.width = '100vw'; canvas.style.height = '100vh';
+    canvas.width  = Math.floor(w.innerWidth  * DPR);
+    canvas.height = Math.floor(w.innerHeight * DPR);
+    canvas.style.width = '100vw';
+    canvas.style.height = '100vh';
   }
   w.addEventListener('resize', resize); resize();
 
-  const TILE = 16, CT = 64, CS = CT * TILE;
-  const K = (x,y)=> x+'|'+y;
+  // === Constants ===
+  const TILE = 16;
+  const CT   = 64;              // tiles per chunk edge
+  const CS   = CT * TILE;       // px per chunk edge
+  const K    = (x,y)=> x+'|'+y;
 
-  // 입력
+  // === Input ===
   const key = {};
   d.addEventListener('keydown', e => key[e.key.toLowerCase()] = true);
   d.addEventListener('keyup',   e => key[e.key.toLowerCase()] = false);
 
-  // === UI (시간 + 인벤토리 + 루팅창) ===
+  // === UI ===
   const ui = d.createElement('div');
-  ui.style.cssText =
-    `position:fixed;inset:0;pointer-events:none;font:14px system-ui;color:#e7e7ea`;
+  ui.style.cssText = 'position:fixed;inset:0;pointer-events:none;font:14px system-ui;color:#e7e7ea';
   ui.innerHTML = `
     <div style="position:absolute;left:8px;top:8px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;pointer-events:auto">
       <b>시간</b> <span id="t">00:00</span>
     </div>
     <div id="inv" style="position:absolute;left:8px;top:48px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;display:flex;gap:8px;pointer-events:auto"></div>
+    <div id="hint" style="position:absolute;left:50%;top:70%;transform:translate(-50%,0);background:#0009;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;display:none;pointer-events:none">E 상호작용</div>
     <div id="loot" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:420px;max-width:92vw;max-height:70vh;overflow:auto;background:#0f1319f2;border:1px solid #2b2f39;border-radius:14px;padding:10px;box-shadow:0 4px 30px rgba(0,0,0,.45);pointer-events:auto">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
         <b id="lootT">루팅</b>
-        <span>
-          <button id="takeAll">모두</button>
-          <button id="closeL">닫기[ESC]</button>
-        </span>
+        <span><button id="takeAll">모두</button><button id="closeL">닫기[ESC]</button></span>
       </div>
       <div id="lootG" style="display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center"></div>
       <div style="text-align:right;margin-top:6px"><small id="cap">0/0</small></div>
@@ -58,28 +52,33 @@ export function start(canvas) {
   const lootT  = ui.querySelector('#lootT');
   const lootG  = ui.querySelector('#lootG');
   const capEl  = ui.querySelector('#cap');
+  const hintEl = ui.querySelector('#hint');
+
   ui.querySelector('#closeL').onclick = ()=>{ S.uiLoot=false; lootEl.style.display='none'; };
   ui.querySelector('#takeAll').onclick = ()=> takeAll(S.openedCont);
 
-  // === 상태 ===
+  // === State ===
   const S = {
-    seed: (Date.now()>>>0) ^ (Math.random()*1e9|0),
-    cam: { x: 0, y: 0 },
-    p:   { x: 32, y: 32, vx:0, vy:0, spd: 1.6, ldx:1, ldy:0, carry:0, cap:50 },
-    time: 0,
-    chunks: new Map(),
-    inside: null,
-    ovA: 0,           // 외부 오버레이 알파(0→1)
-    fadeInSec: 2,     // 실내 진입 페이드
-    uiLoot: false,
-    openedCont: null,
-    inv: { wood:0, scrap:0, food:0 }
+    seed:  (Date.now()>>>0) ^ (Math.random()*1e9|0),
+    cam:   { x: 0, y: 0 },
+    p:     { x: 32, y: 32, vx:0, vy:0, spd: 1.6, ldx:1, ldy:0, carry:0, cap:50 },
+    time:  0,
+    chunks:new Map(),
+    inside:null,       // 현재 플레이어가 있는 방 객체
+    ovA:   0,          // 실내 시 외부 오버레이 알파 (0→1)
+    fadeInSec: 2,      // 실내 진입 페이드 시간
+    uiLoot:false,
+    openedCont:null,
+    inv: { wood:0, scrap:0, food:0 },
+    nearPrompt:false
   };
 
-  // 난수/유틸
+  // === RNG ===
   function m32(a){ return function(){ let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296; } }
   const rng = m32(S.seed);
   function RI(r,a,b){ return Math.floor(r()*(b-a+1))+a; }
+
+  // === Coords ===
   function W2C(x,y){ let cx=Math.floor(x/CS), cy=Math.floor(y/CS);
     if(x<0 && x%CS!==0) cx=Math.floor((x-CS+1)/CS);
     if(y<0 && y%CS!==0) cy=Math.floor((y-CS+1)/CS);
@@ -89,7 +88,7 @@ export function start(canvas) {
   function G2P(gx,gy){ return { x:gx*TILE, y:gy*TILE }; }
   function CK(cx,cy){ return cx+'|'+cy; }
 
-  // 청크/월드
+  // === World / Chunks ===
   function getChunk(cx,cy){ return S.chunks.get(CK(cx,cy)); }
   function setChunk(cx,cy,ch){ S.chunks.set(CK(cx,cy), ch); }
   function sRng(cx,cy){ const h=(cx*73856093 ^ cy*19349663 ^ S.seed)>>>0; return m32(h); }
@@ -98,14 +97,15 @@ export function start(canvas) {
     return { cx,cy,
       floors:new Set(), woodFloors:new Set(), walls:new Set(), solid:new Set(),
       rooms:[], doors:new Map(),
-      cont:[] // ← 컨테이너들
+      cont:[]
     };
   }
 
   function genChunk(cx,cy){
     const ch = newChunk(cx,cy), r = sRng(cx,cy);
     const gx0 = cx*CT, gy0 = cy*CT;
-    // 방 몇 개
+
+    // 방 생성
     const count = RI(r,2,4), margin=4;
     let guard = 0;
     while (ch.rooms.length < count && guard < 60) {
@@ -116,14 +116,20 @@ export function start(canvas) {
       if (isBusy(ch,bx,by,w,h)) continue;
       addRoom(ch,bx,by,w,h,r);
     }
+
     postOverlap(ch);
     spawnContainers(ch, r, gx0, gy0);
+
+    // 시작 청크(0,0)에는 최소 6개 보장
+    if (cx===0 && cy===0 && ch.cont.length < 6) {
+      forceStarterContainers(ch);
+    }
     return ch;
   }
 
   function isBusy(ch,bx,by,w,h){
-    for(let x=bx-1;x<bx+w+1;x++)
-      for(let y=by-1;y<by+h+1;y++){
+    for(let x=bx-1; x<bx+w+1; x++)
+      for(let y=by-1; y<by+h+1; y++){
         const k=K(x,y);
         if(ch.floors.has(k)||ch.woodFloors.has(k)||ch.walls.has(k)||ch.solid.has(k))
           return true;
@@ -144,7 +150,7 @@ export function start(canvas) {
 
   function addRoom(ch,bx,by,w,h,r){
     const rm = { id: ch.rooms.length, tiles:[] };
-    // 실내 바닥(나무)
+    // 내부 나무 바닥
     for(let ix=1; ix<w-1; ix++)
       for(let iy=1; iy<h-1; iy++){
         const gx=bx+ix, gy=by+iy, k=K(gx,gy);
@@ -164,15 +170,18 @@ export function start(canvas) {
     ch.rooms.push(rm);
   }
 
-  // 겹치는 벽 → 일부 제거/문 생성
+  // 겹치는 벽 정리(일부 제거/문 생성)
   function postOverlap(ch){
     const marks = new Map();
     for(const k of ch.walls){
       const [gx,gy] = k.split('|').map(Number);
-      const L=K(gx-1,gy), R=K(gx+1,gy), U=K(gx,gy-1), Dd=K(gx,gy+1);
-      const lf=ch.woodFloors.has(L), rf=ch.woodFloors.has(R), uf=ch.woodFloors.has(U), df=ch.woodFloors.has(Dd);
-      if (lf && rf) { const g='v|'+gx; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'v'}); }
-      else if (uf && df) { const g='h|'+gy; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'h'}); }
+      const L=K(gx-1,gy), R=K(gx+1,gy), U=K(gx,gy-1), D=K(gx,gy+1);
+      const lf=ch.woodFloors.has(L), rf=ch.woodFloors.has(R), uf=ch.woodFloors.has(U), df=ch.woodFloors.has(D);
+      if (lf && rf) {
+        const g='v|'+gx; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'v'});
+      } else if (uf && df) {
+        const g='h|'+gy; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'h'});
+      }
     }
     if (marks.size===0) return;
     const rm = new Set(), mk=[];
@@ -182,8 +191,8 @@ export function start(canvas) {
       if(r()<.55){ for(const t of arr) rm.add(K(t.gx,t.gy)); }
       else {
         const n=arr.length, dn=Math.min(2,Math.max(1,Math.floor(n/6)));
-        const pick=new Set();
-        for(let i=0;i<dn;i++){ let idx=(Math.floor(r()*n)); let guard=0; while(pick.has(idx)&&guard<8){ idx=(idx+1)%n; guard++; } pick.add(idx); }
+        const pick=new Set(); 
+        for(let i=0;i<dn;i++){ let idx=(Math.floor(r()*n)); let gd=0; while(pick.has(idx)&&gd<8){ idx=(idx+1)%n; gd++; } pick.add(idx); }
         let i=0; for(const t of arr){ if(pick.has(i)) mk.push(t); i++; }
       }
     }
@@ -198,7 +207,7 @@ export function start(canvas) {
     }
   }
 
-  // 컨테이너 스폰 (실내 위주 + 실외 약간)
+  // 컨테이너 스폰 (실내 위주 + 실외도 소폭)
   function spawnContainers(ch, r, gx0, gy0){
     const used = new Set();
     const place = (gx,gy)=>{ const k=K(gx,gy); if(used.has(k)) return false; used.add(k); return true; };
@@ -206,7 +215,7 @@ export function start(canvas) {
 
     function many(kind, count, onlyInside=false){
       let p=0, guard=0;
-      while(p<count && guard<count*80){
+      while(p<count && guard<count*120){
         guard++;
         const gx = RI(r, gx0+2, gx0+CT-3);
         const gy = RI(r, gy0+2, gy0+CT-3);
@@ -217,13 +226,27 @@ export function start(canvas) {
         p++;
       }
     }
-    many('box',   RI(r,2,5), true);   // 실내 상자
-    many('barrel',RI(r,1,3), false);  // 드럼통(실외도)
-    many('scrap', RI(r,1,3), false);  // 고철더미
+    many('box',   RI(r,2,5), true);
+    many('barrel',RI(r,2,4), false);
+    many('scrap', RI(r,2,4), false);
+  }
+
+  // 시작 지점 보장 스폰
+  function forceStarterContainers(ch){
+    const kinds = ['box','barrel','scrap'];
+    let i=0;
+    const around = [[2,0],[0,2],[-2,0],[0,-2],[3,3],[-3,-2]];
+    for (const off of around){
+      const gx = Math.round(S.p.x / TILE) + off[0];
+      const gy = Math.round(S.p.y / TILE) + off[1];
+      ch.cont.push({ type:kinds[i%3], x:gx*TILE, y:gy*TILE, w:1, h:1, loot:null, opened:false, solid:false });
+      i++;
+    }
   }
 
   function ensureVisibleChunks(){
-    const vw=canvas.width/(DPR*DRS), vh=canvas.height/(DPR*DRS);
+    const vw = canvas.width / DPR;
+    const vh = canvas.height / DPR;
     const x0=S.cam.x, y0=S.cam.y, x1=x0+vw, y1=y0+vh;
     const c0=W2C(x0,y0), c1=W2C(x1,y1);
     const minCx=Math.min(c0.cx,c1.cx)-1, maxCx=Math.max(c0.cx,c1.cx)+1;
@@ -234,7 +257,7 @@ export function start(canvas) {
       }
   }
 
-  // 충돌/실내 판정
+  // === Collision / Inside ===
   function isSolidAt(x,y){
     const {gx,gy}=P2G(x,y);
     const {cx,cy}=W2C(x,y);
@@ -247,7 +270,6 @@ export function start(canvas) {
           if(d && d.open) continue;
           return true;
         }
-        // 컨테이너 충돌(현재 비활성: solid=false)
       }
     return false;
   }
@@ -266,7 +288,7 @@ export function start(canvas) {
     return null;
   }
 
-  // 상호작용(E): 문 우선, 없으면 컨테이너 열기
+  // === Interactions (E) ===
   let eReady = true;
   w.addEventListener('keydown', e=>{
     const k = e.key.toLowerCase();
@@ -306,14 +328,14 @@ export function start(canvas) {
   }
 
   function interact(){
-    if (S.uiLoot) return; // 루팅창 열려있을 땐 무시
-    const d = nearestDoor(S.p.x,S.p.y, 20);
-    if (d) { d.open = !d.open; return; }
-    const c = nearestContainer(S.p.x,S.p.y, 20);
+    if (S.uiLoot) return;
+    const d0 = nearestDoor(S.p.x,S.p.y, 20);
+    if (d0) { d0.open = !d0.open; return; }
+    const c  = nearestContainer(S.p.x,S.p.y, 20);
     if (c) { openLoot(c); return; }
   }
 
-  // 인벤토리/루팅
+  // === Inventory / Loot ===
   const ICON = { wood:'🪵', scrap:'🔩', food:'🥫' };
   const NAME = { wood:'목재', scrap:'고철', food:'식량' };
 
@@ -334,7 +356,7 @@ export function start(canvas) {
   updInvUI();
 
   function rollLoot(c){
-    if (c.loot) return; // 1회만 생성
+    if (c.loot) return;
     const r = rng;
     const loot = { wood:0, scrap:0, food:0 };
     if (c.type==='box')   { loot.wood = RI(r,2,6); loot.food = RI(r,0,2); if(r()<.25) loot.scrap += RI(r,1,2); }
@@ -342,7 +364,6 @@ export function start(canvas) {
     if (c.type==='scrap') { loot.scrap = RI(r,3,8); if(r()<.15) loot.wood += 1; }
     c.loot = loot;
   }
-
   function openLoot(c){
     rollLoot(c);
     S.uiLoot = true;
@@ -351,7 +372,6 @@ export function start(canvas) {
     lootT.textContent = '루팅 — ' + ({box:'상자', barrel:'드럼통', scrap:'고철더미'}[c.type]||'');
     renderLoot(c);
   }
-
   function renderLoot(c){
     lootG.innerHTML = '';
     let empty = true;
@@ -373,8 +393,6 @@ export function start(canvas) {
     }
     capEl.textContent = `${S.p.carry}/${S.p.cap}`;
   }
-
-  function canCarry(q){ return Math.max(0, S.p.cap - S.p.carry) >= q; }
   function addInv(k, q){
     const room = Math.max(0, S.p.cap - S.p.carry);
     const take = Math.min(room, q);
@@ -403,9 +421,9 @@ export function start(canvas) {
     renderLoot(c);
   }
 
-  // 이동/카메라
+  // === Movement / Camera ===
   function move(dt){
-    if (S.uiLoot) return; // 루팅창 열려 있을 땐 이동 정지
+    if (S.uiLoot) return; // 루팅창 열려있으면 이동 정지
     let ix=0, iy=0;
     if (key['w']||key['arrowup'])    iy-=1;
     if (key['s']||key['arrowdown'])  iy+=1;
@@ -427,52 +445,57 @@ export function start(canvas) {
   }
 
   function updateCam(dt){
-    const vw=canvas.width/(DPR*DRS), vh=canvas.height/(DPR*DRS);
+    const vw=canvas.width / DPR, vh=canvas.height / DPR;
     const tx = S.p.x - vw/2, ty = S.p.y - vh/2;
     S.cam.x += (tx - S.cam.x)*Math.min(1, dt*4);
     S.cam.y += (ty - S.cam.y)*Math.min(1, dt*4);
   }
 
-  // 실내 오버레이
+  // === Overlay (full-res) ===
   let fx=null, fxc=null;
   function drawOverlay(camX,camY){
     if (!S.inside) return;
     if(!fx){ fx=d.createElement('canvas'); fxc=fx.getContext('2d'); }
+    // 보조 캔버스를 화면과 동일 해상도로 유지 (다운스케일 제거)
+    if(fx.width!==canvas.width || fx.height!==canvas.height){
+      fx.width = canvas.width; fx.height = canvas.height;
+    }
 
-    const tot=canvas.width*canvas.height, sc=tot>1800000?.5:1;
-    const fw=Math.max(1,Math.floor(canvas.width*sc)), fh=Math.max(1,Math.floor(canvas.height*sc));
-    if(fx.width!==fw||fx.height!==fh){ fx.width=fw; fx.height=fh; }
-
+    // 현재 화면 복사 + 외부 채도 0.5 + 약블러
     fxc.setTransform(1,0,0,1,0,0);
-    fxc.clearRect(0,0,fw,fh);
+    fxc.clearRect(0,0,fx.width,fx.height);
     fxc.filter='saturate(0.5) blur(1px)';
-    fxc.drawImage(canvas,0,0,canvas.width,canvas.height,0,0,fw,fh);
+    fxc.drawImage(canvas,0,0);
 
+    // 실내 타일 부분은 빼서(구멍) 내부는 원색 유지
     fxc.globalCompositeOperation='destination-out';
     fxc.beginPath();
-    const scale=sc*DPR*DRS;
     for(const t of S.inside.tiles){
-      const x=(t.x - TILE/2 - camX)*scale, y=(t.y - TILE/2 - camY)*scale;
-      fxc.rect(x,y,TILE*scale,TILE*scale);
+      const x = Math.round((t.x - TILE/2 - camX) * DPR);
+      const y = Math.round((t.y - TILE/2 - camY) * DPR);
+      const s = Math.round(TILE * DPR);
+      fxc.rect(x,y,s,s);
     }
     fxc.fill();
     fxc.globalCompositeOperation='source-over';
 
+    // 알파로 페이드
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.globalAlpha = Math.max(0, Math.min(1, S.ovA));
-    ctx.drawImage(fx,0,0,fw,fh,0,0,canvas.width,canvas.height);
+    ctx.drawImage(fx,0,0);
     ctx.restore();
   }
 
-  // 그리기
+  // === Rendering ===
   function drawBG(){
-    const W=canvas.width/(DPR*DRS), H=canvas.height/(DPR*DRS);
+    const W=canvas.width / DPR, H=canvas.height / DPR;
     const sx=Math.floor(S.cam.x/TILE)-2, sy=Math.floor(S.cam.y/TILE)-2;
     const ex=sx+Math.ceil(W/TILE)+4,    ey=sy+Math.ceil(H/TILE)+4;
     for(let gx=sx;gx<ex;gx++) for(let gy=sy;gy<ey;gy++){
       const v=Math.abs((gx*374761393+gy*668265263)%255);
-      ctx.fillStyle=`rgb(${22+(v%10)},${36+(v%14)},${24+(v%12)})`; // 연한 초록
+      // 약간 연한 초록
+      ctx.fillStyle=`rgb(${22+(v%10)},${36+(v%14)},${24+(v%12)})`;
       ctx.fillRect(gx*TILE,gy*TILE,TILE,TILE);
     }
   }
@@ -480,7 +503,7 @@ export function start(canvas) {
     forEachVisibleChunk(ch=>{
       for(const k of ch.woodFloors){
         const [gx,gy]=k.split('|').map(Number);
-        ctx.fillStyle='#3a2f21'; // 실내 나무 바닥
+        ctx.fillStyle='#3a2f21';
         ctx.fillRect(gx*TILE-TILE/2, gy*TILE-TILE/2, TILE, TILE);
       }
       for(const k of ch.floors){
@@ -496,6 +519,7 @@ export function start(canvas) {
       for(const k of ch.walls){
         const [gx,gy]=k.split('|').map(Number), x=gx*TILE, y=gy*TILE;
         ctx.fillStyle='#384050'; ctx.fillRect(x-TILE/2,y-TILE/2,TILE,TILE);
+        // 인접 벽끼리 경계선 제거
         ctx.strokeStyle='#2b2f39'; ctx.beginPath();
         if(!has(gx,gy-1)){ ctx.moveTo(x-TILE/2+0.5,y-TILE/2+0.5); ctx.lineTo(x+TILE/2-0.5,y-TILE/2+0.5); }
         if(!has(gx+1,gy)){ ctx.moveTo(x+TILE/2-0.5,y-TILE/2+0.5); ctx.lineTo(x+TILE/2-0.5,y+TILE/2-0.5); }
@@ -529,7 +553,7 @@ export function start(canvas) {
         } else if(c.type==='scrap'){
           ctx.fillStyle='#4b5560'; ctx.fillRect(x+3,y+6,10,6);
         }
-        // 비어 있으면 흐림 처리
+        // 다 비운 컨테이너는 약간 흐리게
         if(c.loot && (c.loot.wood|0)+(c.loot.scrap|0)+(c.loot.food|0)===0){
           ctx.globalAlpha=.45; ctx.fillStyle='rgba(0,0,0,.15)';
           ctx.fillRect(x,y,TILE,TILE); ctx.globalAlpha=1;
@@ -545,7 +569,7 @@ export function start(canvas) {
   }
 
   function forEachVisibleChunk(f){
-    const vw=canvas.width/(DPR*DRS), vh=canvas.height/(DPR*DRS);
+    const vw=canvas.width / DPR, vh=canvas.height / DPR;
     const x0=S.cam.x, y0=S.cam.y, x1=x0+vw, y1=y0+vh;
     const c0=W2C(x0,y0), c1=W2C(x1,y1);
     const minCx=Math.min(c0.cx,c1.cx)-1, maxCx=Math.max(c0.cx,c1.cx)+1;
@@ -557,10 +581,10 @@ export function start(canvas) {
       }
   }
 
-  // 루프
+  // === Loop ===
   let last=performance.now();
-  function loop(n){
-    const dt = Math.min(.05, (n-last)/1000); last=n;
+  function loop(now){
+    const dt = Math.min(.05, (now-last)/1000); last=now;
     S.time += dt; const m=Math.floor(S.time/60), s=Math.floor(S.time%60);
     uiTime.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 
@@ -570,17 +594,25 @@ export function start(canvas) {
 
     const wasInside = !!S.inside;
     S.inside = insideRoomAt(S.p.x,S.p.y);
-    if (!wasInside && S.inside) S.ovA = 0;
+    if (!wasInside && S.inside) S.ovA = 0;                // 입장: 0부터
     if ( S.inside) {
-      const rate = 1/Math.max(0.0001, S.fadeInSec);
-      S.ovA = Math.min(1, S.ovA + rate*dt);   // 2초 페이드
+      const rate = 1/Math.max(0.0001, S.fadeInSec);       // 2초 페이드
+      S.ovA = Math.min(1, S.ovA + rate*dt);
     } else {
-      S.ovA = 0;                               // 퇴장 즉시 해제
+      S.ovA = 0;                                          // 퇴장: 즉시 해제
     }
 
+    // 힌트(문/컨테이너)
+    const nearDoor = !!nearestDoor(S.p.x,S.p.y,20);
+    const nearCont = !!nearestContainer(S.p.x,S.p.y,20);
+    S.nearPrompt   = nearDoor || nearCont;
+    hintEl.style.display = S.nearPrompt ? 'block' : 'none';
+    hintEl.textContent = nearDoor ? 'E 문 여닫기' : (nearCont ? 'E 루팅' : 'E 상호작용');
+
+    // === draw ===
     ctx.save();
     ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.scale(DPR*DRS, DPR*DRS);
+    ctx.scale(DPR, DPR);
     const camX=Math.round(S.cam.x), camY=Math.round(S.cam.y);
     ctx.translate(-camX, -camY);
 
@@ -590,11 +622,11 @@ export function start(canvas) {
     drawContainers();
     drawPlayer();
 
-    // 실내 덮개(탐험 여부 무관) — 현재 실내 제외
+    // 실내 덮개 — "현재 들어간 방만 제외" (중요: return이 아니라 continue!)
     const cover = '#384050';
     forEachVisibleChunk(ch=>{
       for(const rm of ch.rooms){
-        if (S.inside && rm===S.inside) continue;
+        if (S.inside && rm === S.inside) continue; // ← 버그 수정 포인트
         for(const t of rm.tiles){
           ctx.fillStyle=cover;
           ctx.fillRect(t.x - TILE/2, t.y - TILE/2, TILE, TILE);
@@ -604,6 +636,7 @@ export function start(canvas) {
 
     drawOverlay(camX,camY);
     ctx.restore();
+
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
