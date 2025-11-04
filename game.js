@@ -594,7 +594,7 @@ export function start(canvas) {
     const cover = '#384050';
     forEachVisibleChunk(ch=>{
       for(const rm of ch.rooms){
-        if (S.inside && rm===S.inside) return;
+        if (S.inside && rm===S.inside) continue;
         for(const t of rm.tiles){
           ctx.fillStyle=cover;
           ctx.fillRect(t.x - TILE/2, t.y - TILE/2, TILE, TILE);
