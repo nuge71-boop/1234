@@ -22,45 +22,31 @@ export function start(canvas) {
   }
   w.addEventListener('resize', resize); resize();
 
-  // ===== 기본 상수 =====
-  const TILE = 16;
-  const CT = 64;                // 청크 타일
-  const CS = CT * TILE;         // 청크 픽셀
+  const TILE = 16, CT = 64, CS = CT * TILE;
   const K = (x,y)=> x+'|'+y;
 
-  // ===== 입력 =====
   const key = {};
   d.addEventListener('keydown', e => key[e.key.toLowerCase()] = true);
   d.addEventListener('keyup',   e => key[e.key.toLowerCase()] = false);
 
-  // ===== UI(동적 생성) =====
+  // 간단 시간 표시
   const ui = d.createElement('div');
-  ui.style.cssText = `
-    position:fixed;inset:0;pointer-events:none;font:14px system-ui;color:#e7e7ea;
-  `;
-  ui.innerHTML = `
-    <div id="pill" style="pointer-events:auto;position:absolute;left:8px;top:8px;
-      background:#141922cc;border:1px solid #2b2f39;border-radius:10px;
-      padding:6px 10px;display:inline-flex;gap:8px;align-items:center">
-      <b>시간</b><span id="t">00:00</span>
-    </div>
-  `;
+  ui.style.cssText = `position:fixed;left:8px;top:8px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;color:#e7e7ea;font:14px system-ui;pointer-events:none`;
+  ui.innerHTML = `<b>시간</b> <span id="t">00:00</span>`;
   d.body.appendChild(ui);
   const uiTime = ui.querySelector('#t');
 
-  // ===== 상태 =====
   const S = {
     seed: (Date.now()>>>0) ^ (Math.random()*1e9|0),
     cam: { x: 0, y: 0 },
     p:   { x: 32, y: 32, vx:0, vy:0, spd: 1.6, ldx:1, ldy:0 },
     time: 0,
     chunks: new Map(),
-    inside: null,        // 플레이어가 서 있는 실내(타일 목록)
-    ovA: 0,              // 외부 오버레이 알파(0→1) : 2초 페이드
-    fadeInSec: 2
+    inside: null,
+    ovA: 0,           // 외부 오버레이 알파(0→1)
+    fadeInSec: 2      // 실내 진입 시 2초 페이드
   };
 
-  // ===== 유틸 난수 =====
   function m32(a){ return function(){ let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296; } }
   const rng = m32(S.seed);
   function RI(r,a,b){ return Math.floor(r()*(b-a+1))+a; }
@@ -74,10 +60,8 @@ export function start(canvas) {
   function G2P(gx,gy){ return { x:gx*TILE, y:gy*TILE }; }
   function CK(cx,cy){ return cx+'|'+cy; }
 
-  // ===== 청크 =====
   function getChunk(cx,cy){ return S.chunks.get(CK(cx,cy)); }
   function setChunk(cx,cy,ch){ S.chunks.set(CK(cx,cy), ch); }
-
   function sRng(cx,cy){ const h=(cx*73856093 ^ cy*19349663 ^ S.seed)>>>0; return m32(h); }
 
   function newChunk(cx,cy){
@@ -87,8 +71,6 @@ export function start(canvas) {
   function genChunk(cx,cy){
     const ch = newChunk(cx,cy), r = sRng(cx,cy);
     const gx0 = cx*CT, gy0 = cy*CT;
-
-    // 방 몇 개 배치
     const count = RI(r,2,4), margin=4;
     let guard = 0;
     while (ch.rooms.length < count && guard < 60) {
@@ -126,14 +108,12 @@ export function start(canvas) {
 
   function addRoom(ch,bx,by,w,h,r){
     const rm = { id: ch.rooms.length, tiles:[] };
-    // 내부 바닥(나무)
     for(let ix=1; ix<w-1; ix++)
       for(let iy=1; iy<h-1; iy++){
         const gx=bx+ix, gy=by+iy, k=K(gx,gy);
         ch.woodFloors.add(k);
         rm.tiles.push(G2P(gx,gy));
       }
-    // 벽
     for(let ix=0; ix<w; ix++)
       for(let iy=0; iy<h; iy++){
         if(ix===0||iy===0||ix===w-1||iy===h-1){
@@ -146,7 +126,6 @@ export function start(canvas) {
     ch.rooms.push(rm);
   }
 
-  // 겹치는 벽 처리(일부는 문으로)
   function postOverlap(ch){
     const marks = new Map();
     for(const k of ch.walls){
@@ -194,7 +173,6 @@ export function start(canvas) {
       }
   }
 
-  // ===== 충돌/실내 판정 =====
   function isSolidAt(x,y){
     const {gx,gy}=P2G(x,y);
     const {cx,cy}=W2C(x,y);
@@ -225,7 +203,6 @@ export function start(canvas) {
     return null;
   }
 
-  // ===== 문/상호작용(E) =====
   let eReady = true;
   w.addEventListener('keydown', e=>{
     const k = e.key.toLowerCase();
@@ -248,13 +225,10 @@ export function start(canvas) {
   }
 
   function interact(){
-    // 문이 가까우면 여닫기
     const d = nearestDoor(S.p.x,S.p.y, 20);
     if (d) { d.open = !d.open; return; }
-    // 추후: 상자/드럼통 루팅 추가 자리
   }
 
-  // ===== 이동 =====
   function move(dt){
     let ix=0, iy=0;
     if (key['w']||key['arrowup'])    iy-=1;
@@ -276,7 +250,6 @@ export function start(canvas) {
     } else { S.p.x=nx; S.p.y=ny; }
   }
 
-  // ===== 카메라(살짝 마우스쪽 리드 대신 중앙 고정) =====
   function updateCam(dt){
     const vw=canvas.width/(DPR*DRS), vh=canvas.height/(DPR*DRS);
     const tx = S.p.x - vw/2, ty = S.p.y - vh/2;
@@ -284,7 +257,6 @@ export function start(canvas) {
     S.cam.y += (ty - S.cam.y)*Math.min(1, dt*4);
   }
 
-  // ===== 오버레이(실내일 때 외부만 채도 0.5로, 2초 페이드) =====
   let fx=null, fxc=null;
   function drawOverlay(camX,camY){
     if (!S.inside) return;
@@ -294,13 +266,11 @@ export function start(canvas) {
     const fw=Math.max(1,Math.floor(canvas.width*sc)), fh=Math.max(1,Math.floor(canvas.height*sc));
     if(fx.width!==fw||fx.height!==fh){ fx.width=fw; fx.height=fh; }
 
-    // 1) 현재 화면을 다운스케일 캔버스로 복사 + 채도 0.5 + 약간 블러
     fxc.setTransform(1,0,0,1,0,0);
     fxc.clearRect(0,0,fw,fh);
-    fxc.filter='saturate(0.5) blur(1px)';
+    fxc.filter='saturate(0.5) blur(1px)'; // 채도 0.5 + 약블러
     fxc.drawImage(canvas,0,0,canvas.width,canvas.height,0,0,fw,fh);
 
-    // 2) 실내 타일 부분은 비워서(구멍) 내부는 원색 유지
     fxc.globalCompositeOperation='destination-out';
     fxc.beginPath();
     const scale=sc*DPR*DRS;
@@ -311,7 +281,6 @@ export function start(canvas) {
     fxc.fill();
     fxc.globalCompositeOperation='source-over';
 
-    // 3) 알파로 페이드
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.globalAlpha = Math.max(0, Math.min(1, S.ovA));
@@ -319,15 +288,13 @@ export function start(canvas) {
     ctx.restore();
   }
 
-  // ===== 그리기 =====
   function drawBG(){
     const W=canvas.width/(DPR*DRS), H=canvas.height/(DPR*DRS);
     const sx=Math.floor(S.cam.x/TILE)-2, sy=Math.floor(S.cam.y/TILE)-2;
     const ex=sx+Math.ceil(W/TILE)+4,    ey=sy+Math.ceil(H/TILE)+4;
     for(let gx=sx;gx<ex;gx++) for(let gy=sy;gy<ey;gy++){
       const v=Math.abs((gx*374761393+gy*668265263)%255);
-      // 살짝 더 연한 초록 배경
-      ctx.fillStyle=`rgb(${22+(v%10)},${36+(v%14)},${24+(v%12)})`;
+      ctx.fillStyle=`rgb(${22+(v%10)},${36+(v%14)},${24+(v%12)})`; // 연한 초록
       ctx.fillRect(gx*TILE,gy*TILE,TILE,TILE);
     }
   }
@@ -338,7 +305,7 @@ export function start(canvas) {
         ctx.fillStyle='#3a2f21'; // 실내 나무 바닥
         ctx.fillRect(gx*TILE-TILE/2, gy*TILE-TILE/2, TILE, TILE);
       }
-      for(const k of ch.floors){ // (필요 시 외부 바닥)
+      for(const k of ch.floors){
         const [gx,gy]=k.split('|').map(Number);
         ctx.fillStyle='#1c2130';
         ctx.fillRect(gx*TILE-TILE/2, gy*TILE-TILE/2, TILE, TILE);
@@ -351,7 +318,6 @@ export function start(canvas) {
       for(const k of ch.walls){
         const [gx,gy]=k.split('|').map(Number), x=gx*TILE, y=gy*TILE;
         ctx.fillStyle='#384050'; ctx.fillRect(x-TILE/2,y-TILE/2,TILE,TILE);
-        // 경계선(이웃한 벽끼리는 선 제거)
         ctx.strokeStyle='#2b2f39'; ctx.beginPath();
         if(!has(gx,gy-1)){ ctx.moveTo(x-TILE/2+0.5,y-TILE/2+0.5); ctx.lineTo(x+TILE/2-0.5,y-TILE/2+0.5); }
         if(!has(gx+1,gy)){ ctx.moveTo(x+TILE/2-0.5,y-TILE/2+0.5); ctx.lineTo(x+TILE/2-0.5,y+TILE/2-0.5); }
@@ -391,7 +357,6 @@ export function start(canvas) {
       }
   }
 
-  // ===== 루프 =====
   let last=performance.now();
   function loop(n){
     const dt = Math.min(.05, (n-last)/1000); last=n;
@@ -404,15 +369,14 @@ export function start(canvas) {
 
     const wasInside = !!S.inside;
     S.inside = insideRoomAt(S.p.x,S.p.y);
-    if (!wasInside && S.inside) S.ovA = 0;           // 입장: 0부터 페이드 시작
+    if (!wasInside && S.inside) S.ovA = 0;
     if ( S.inside) {
       const rate = 1/Math.max(0.0001, S.fadeInSec);
-      S.ovA = Math.min(1, S.ovA + rate*dt);         // 2초 페이드
+      S.ovA = Math.min(1, S.ovA + rate*dt);   // 2초 페이드
     } else {
-      S.ovA = 0;                                     // 퇴장: 즉시 해제
+      S.ovA = 0;                               // 퇴장 즉시 해제
     }
 
-    // === draw ===
     ctx.save();
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.scale(DPR*DRS, DPR*DRS);
@@ -424,7 +388,7 @@ export function start(canvas) {
     drawWalls();
     drawPlayer();
 
-    // 실내를 제외한 모든 실내에 “덮개”(벽과 동일) — 탐험 여부와 상관없이
+    // 탐험 여부와 무관하게, 실내가 아닌 모든 실내에 덮개(벽과 동일 색)
     const cover = '#384050';
     forEachVisibleChunk(ch=>{
       for(const rm of ch.rooms){
@@ -436,9 +400,7 @@ export function start(canvas) {
       }
     });
 
-    // 현재 실내에 있을 때만 외부 흑백(채도 0.5) 페이드 적용
     drawOverlay(camX,camY);
-
     ctx.restore();
     requestAnimationFrame(loop);
   }
