@@ -1,4 +1,4 @@
-// game.js — base v1: 월드/건물/문/실내외 오버레이 + WASD 이동
+// game.js — base v2: 월드/건물/문 + 컨테이너 스폰 + 루팅 UI + 인벤토리 + WASD
 export function start(canvas) {
   const d = document, w = window;
   const ctx = canvas.getContext('2d', { alpha: false });
@@ -25,32 +25,61 @@ export function start(canvas) {
   const TILE = 16, CT = 64, CS = CT * TILE;
   const K = (x,y)=> x+'|'+y;
 
+  // 입력
   const key = {};
   d.addEventListener('keydown', e => key[e.key.toLowerCase()] = true);
   d.addEventListener('keyup',   e => key[e.key.toLowerCase()] = false);
 
-  // 간단 시간 표시
+  // === UI (시간 + 인벤토리 + 루팅창) ===
   const ui = d.createElement('div');
-  ui.style.cssText = `position:fixed;left:8px;top:8px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;color:#e7e7ea;font:14px system-ui;pointer-events:none`;
-  ui.innerHTML = `<b>시간</b> <span id="t">00:00</span>`;
+  ui.style.cssText =
+    `position:fixed;inset:0;pointer-events:none;font:14px system-ui;color:#e7e7ea`;
+  ui.innerHTML = `
+    <div style="position:absolute;left:8px;top:8px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;pointer-events:auto">
+      <b>시간</b> <span id="t">00:00</span>
+    </div>
+    <div id="inv" style="position:absolute;left:8px;top:48px;background:#141922cc;border:1px solid #2b2f39;border-radius:10px;padding:6px 10px;display:flex;gap:8px;pointer-events:auto"></div>
+    <div id="loot" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:420px;max-width:92vw;max-height:70vh;overflow:auto;background:#0f1319f2;border:1px solid #2b2f39;border-radius:14px;padding:10px;box-shadow:0 4px 30px rgba(0,0,0,.45);pointer-events:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+        <b id="lootT">루팅</b>
+        <span>
+          <button id="takeAll">모두</button>
+          <button id="closeL">닫기[ESC]</button>
+        </span>
+      </div>
+      <div id="lootG" style="display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center"></div>
+      <div style="text-align:right;margin-top:6px"><small id="cap">0/0</small></div>
+    </div>
+  `;
   d.body.appendChild(ui);
   const uiTime = ui.querySelector('#t');
+  const uiInv  = ui.querySelector('#inv');
+  const lootEl = ui.querySelector('#loot');
+  const lootT  = ui.querySelector('#lootT');
+  const lootG  = ui.querySelector('#lootG');
+  const capEl  = ui.querySelector('#cap');
+  ui.querySelector('#closeL').onclick = ()=>{ S.uiLoot=false; lootEl.style.display='none'; };
+  ui.querySelector('#takeAll').onclick = ()=> takeAll(S.openedCont);
 
+  // === 상태 ===
   const S = {
     seed: (Date.now()>>>0) ^ (Math.random()*1e9|0),
     cam: { x: 0, y: 0 },
-    p:   { x: 32, y: 32, vx:0, vy:0, spd: 1.6, ldx:1, ldy:0 },
+    p:   { x: 32, y: 32, vx:0, vy:0, spd: 1.6, ldx:1, ldy:0, carry:0, cap:50 },
     time: 0,
     chunks: new Map(),
     inside: null,
     ovA: 0,           // 외부 오버레이 알파(0→1)
-    fadeInSec: 2      // 실내 진입 시 2초 페이드
+    fadeInSec: 2,     // 실내 진입 페이드
+    uiLoot: false,
+    openedCont: null,
+    inv: { wood:0, scrap:0, food:0 }
   };
 
+  // 난수/유틸
   function m32(a){ return function(){ let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296; } }
   const rng = m32(S.seed);
   function RI(r,a,b){ return Math.floor(r()*(b-a+1))+a; }
-
   function W2C(x,y){ let cx=Math.floor(x/CS), cy=Math.floor(y/CS);
     if(x<0 && x%CS!==0) cx=Math.floor((x-CS+1)/CS);
     if(y<0 && y%CS!==0) cy=Math.floor((y-CS+1)/CS);
@@ -60,17 +89,23 @@ export function start(canvas) {
   function G2P(gx,gy){ return { x:gx*TILE, y:gy*TILE }; }
   function CK(cx,cy){ return cx+'|'+cy; }
 
+  // 청크/월드
   function getChunk(cx,cy){ return S.chunks.get(CK(cx,cy)); }
   function setChunk(cx,cy,ch){ S.chunks.set(CK(cx,cy), ch); }
   function sRng(cx,cy){ const h=(cx*73856093 ^ cy*19349663 ^ S.seed)>>>0; return m32(h); }
 
   function newChunk(cx,cy){
-    return { cx,cy, floors:new Set(), woodFloors:new Set(), walls:new Set(), solid:new Set(), rooms:[], doors:new Map() };
+    return { cx,cy,
+      floors:new Set(), woodFloors:new Set(), walls:new Set(), solid:new Set(),
+      rooms:[], doors:new Map(),
+      cont:[] // ← 컨테이너들
+    };
   }
 
   function genChunk(cx,cy){
     const ch = newChunk(cx,cy), r = sRng(cx,cy);
     const gx0 = cx*CT, gy0 = cy*CT;
+    // 방 몇 개
     const count = RI(r,2,4), margin=4;
     let guard = 0;
     while (ch.rooms.length < count && guard < 60) {
@@ -82,6 +117,7 @@ export function start(canvas) {
       addRoom(ch,bx,by,w,h,r);
     }
     postOverlap(ch);
+    spawnContainers(ch, r, gx0, gy0);
     return ch;
   }
 
@@ -108,12 +144,14 @@ export function start(canvas) {
 
   function addRoom(ch,bx,by,w,h,r){
     const rm = { id: ch.rooms.length, tiles:[] };
+    // 실내 바닥(나무)
     for(let ix=1; ix<w-1; ix++)
       for(let iy=1; iy<h-1; iy++){
         const gx=bx+ix, gy=by+iy, k=K(gx,gy);
         ch.woodFloors.add(k);
         rm.tiles.push(G2P(gx,gy));
       }
+    // 벽
     for(let ix=0; ix<w; ix++)
       for(let iy=0; iy<h; iy++){
         if(ix===0||iy===0||ix===w-1||iy===h-1){
@@ -126,17 +164,15 @@ export function start(canvas) {
     ch.rooms.push(rm);
   }
 
+  // 겹치는 벽 → 일부 제거/문 생성
   function postOverlap(ch){
     const marks = new Map();
     for(const k of ch.walls){
       const [gx,gy] = k.split('|').map(Number);
       const L=K(gx-1,gy), R=K(gx+1,gy), U=K(gx,gy-1), Dd=K(gx,gy+1);
       const lf=ch.woodFloors.has(L), rf=ch.woodFloors.has(R), uf=ch.woodFloors.has(U), df=ch.woodFloors.has(Dd);
-      if (lf && rf) {
-        const g='v|'+gx; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'v'});
-      } else if (uf && df) {
-        const g='h|'+gy; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'h'});
-      }
+      if (lf && rf) { const g='v|'+gx; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'v'}); }
+      else if (uf && df) { const g='h|'+gy; if(!marks.has(g)) marks.set(g,[]); marks.get(g).push({gx,gy,dir:'h'}); }
     }
     if (marks.size===0) return;
     const rm = new Set(), mk=[];
@@ -146,7 +182,8 @@ export function start(canvas) {
       if(r()<.55){ for(const t of arr) rm.add(K(t.gx,t.gy)); }
       else {
         const n=arr.length, dn=Math.min(2,Math.max(1,Math.floor(n/6)));
-        const pick=new Set(); for(let i=0;i<dn;i++){ let idx=(Math.floor(r()*n)); let guard=0; while(pick.has(idx)&&guard<8){ idx=(idx+1)%n; guard++; } pick.add(idx); }
+        const pick=new Set();
+        for(let i=0;i<dn;i++){ let idx=(Math.floor(r()*n)); let guard=0; while(pick.has(idx)&&guard<8){ idx=(idx+1)%n; guard++; } pick.add(idx); }
         let i=0; for(const t of arr){ if(pick.has(i)) mk.push(t); i++; }
       }
     }
@@ -161,6 +198,30 @@ export function start(canvas) {
     }
   }
 
+  // 컨테이너 스폰 (실내 위주 + 실외 약간)
+  function spawnContainers(ch, r, gx0, gy0){
+    const used = new Set();
+    const place = (gx,gy)=>{ const k=K(gx,gy); if(used.has(k)) return false; used.add(k); return true; };
+    const inRoom = (gx,gy)=> ch.woodFloors.has(K(gx,gy));
+
+    function many(kind, count, onlyInside=false){
+      let p=0, guard=0;
+      while(p<count && guard<count*80){
+        guard++;
+        const gx = RI(r, gx0+2, gx0+CT-3);
+        const gy = RI(r, gy0+2, gy0+CT-3);
+        if (onlyInside && !inRoom(gx,gy)) continue;
+        if (ch.walls.has(K(gx,gy)) || ch.solid.has(K(gx,gy))) continue;
+        if (!place(gx,gy)) continue;
+        ch.cont.push({ type:kind, x:gx*TILE, y:gy*TILE, w:1, h:1, loot:null, opened:false, solid:false });
+        p++;
+      }
+    }
+    many('box',   RI(r,2,5), true);   // 실내 상자
+    many('barrel',RI(r,1,3), false);  // 드럼통(실외도)
+    many('scrap', RI(r,1,3), false);  // 고철더미
+  }
+
   function ensureVisibleChunks(){
     const vw=canvas.width/(DPR*DRS), vh=canvas.height/(DPR*DRS);
     const x0=S.cam.x, y0=S.cam.y, x1=x0+vw, y1=y0+vh;
@@ -173,6 +234,7 @@ export function start(canvas) {
       }
   }
 
+  // 충돌/실내 판정
   function isSolidAt(x,y){
     const {gx,gy}=P2G(x,y);
     const {cx,cy}=W2C(x,y);
@@ -185,6 +247,7 @@ export function start(canvas) {
           if(d && d.open) continue;
           return true;
         }
+        // 컨테이너 충돌(현재 비활성: solid=false)
       }
     return false;
   }
@@ -203,10 +266,12 @@ export function start(canvas) {
     return null;
   }
 
+  // 상호작용(E): 문 우선, 없으면 컨테이너 열기
   let eReady = true;
   w.addEventListener('keydown', e=>{
     const k = e.key.toLowerCase();
     if (k==='e') { if (eReady) interact(); eReady=false; }
+    if (k==='escape' && S.uiLoot) { S.uiLoot=false; lootEl.style.display='none'; }
   });
   w.addEventListener('keyup', e=>{ if(e.key.toLowerCase()==='e') eReady=true; });
 
@@ -224,12 +289,123 @@ export function start(canvas) {
     return best;
   }
 
-  function interact(){
-    const d = nearestDoor(S.p.x,S.p.y, 20);
-    if (d) { d.open = !d.open; return; }
+  function nearestContainer(x,y,rad){
+    let best=null, bd=1e9;
+    const {cx,cy}=W2C(x,y);
+    for(let yy=cy-1; yy<=cy+1; yy++)
+      for(let xx=cx-1; xx<=cx+1; xx++){
+        const ch=getChunk(xx,yy); if(!ch) continue;
+        for(const c of ch.cont){
+          const cxp=c.x - TILE/2 + (c.w*TILE)/2;
+          const cyp=c.y - TILE/2 + (c.h*TILE)/2;
+          const dd=Math.hypot(cxp-x, cyp-y);
+          if(dd<rad && dd<bd){ best=c; bd=dd; }
+        }
+      }
+    return best;
   }
 
+  function interact(){
+    if (S.uiLoot) return; // 루팅창 열려있을 땐 무시
+    const d = nearestDoor(S.p.x,S.p.y, 20);
+    if (d) { d.open = !d.open; return; }
+    const c = nearestContainer(S.p.x,S.p.y, 20);
+    if (c) { openLoot(c); return; }
+  }
+
+  // 인벤토리/루팅
+  const ICON = { wood:'🪵', scrap:'🔩', food:'🥫' };
+  const NAME = { wood:'목재', scrap:'고철', food:'식량' };
+
+  function updInvUI(){
+    uiInv.innerHTML = '';
+    const cap = d.createElement('div');
+    cap.style.cssText = 'background:#141922cc;border:1px solid #2b2f39;border-radius:8px;padding:4px 8px';
+    cap.textContent = `소지 ${S.p.carry}/${S.p.cap}`;
+    uiInv.appendChild(cap);
+    ['wood','scrap','food'].forEach(k=>{
+      const el = d.createElement('div');
+      el.style.cssText = 'background:#141922cc;border:1px solid #2b2f39;border-radius:8px;padding:4px 8px';
+      el.textContent = `${ICON[k]} ${NAME[k]} ${S.inv[k]}`;
+      uiInv.appendChild(el);
+    });
+    capEl.textContent = `${S.p.carry}/${S.p.cap}`;
+  }
+  updInvUI();
+
+  function rollLoot(c){
+    if (c.loot) return; // 1회만 생성
+    const r = rng;
+    const loot = { wood:0, scrap:0, food:0 };
+    if (c.type==='box')   { loot.wood = RI(r,2,6); loot.food = RI(r,0,2); if(r()<.25) loot.scrap += RI(r,1,2); }
+    if (c.type==='barrel'){ loot.scrap = RI(r,2,6); if(r()<.2) loot.food += 1; }
+    if (c.type==='scrap') { loot.scrap = RI(r,3,8); if(r()<.15) loot.wood += 1; }
+    c.loot = loot;
+  }
+
+  function openLoot(c){
+    rollLoot(c);
+    S.uiLoot = true;
+    S.openedCont = c;
+    lootEl.style.display = 'block';
+    lootT.textContent = '루팅 — ' + ({box:'상자', barrel:'드럼통', scrap:'고철더미'}[c.type]||'');
+    renderLoot(c);
+  }
+
+  function renderLoot(c){
+    lootG.innerHTML = '';
+    let empty = true;
+    ['wood','scrap','food'].forEach(k=>{
+      const q = c.loot[k]||0;
+      if (q>0){ empty=false;
+        const nm = d.createElement('div'); nm.textContent = `${ICON[k]} ${NAME[k]}`;
+        const qt = d.createElement('div'); qt.textContent = 'x'+q;
+        const b1 = d.createElement('button'); b1.textContent='1개'; b1.onclick=()=>take(c,k,1);
+        const b2 = d.createElement('button'); b2.textContent='모두'; b2.onclick=()=>take(c,k,q);
+        lootG.append(nm,qt,b1,b2);
+      }
+    });
+    if (empty){
+      const cell = d.createElement('div');
+      cell.style.gridColumn='1 / span 4';
+      cell.textContent='비어 있음';
+      lootG.appendChild(cell);
+    }
+    capEl.textContent = `${S.p.carry}/${S.p.cap}`;
+  }
+
+  function canCarry(q){ return Math.max(0, S.p.cap - S.p.carry) >= q; }
+  function addInv(k, q){
+    const room = Math.max(0, S.p.cap - S.p.carry);
+    const take = Math.min(room, q);
+    if (take<=0) return 0;
+    S.inv[k] += take;
+    S.p.carry += take;
+    updInvUI();
+    return take;
+  }
+  function take(c,k,q){
+    const have = c.loot[k]||0;
+    if (have<=0) return;
+    const t = addInv(k, Math.min(q, have));
+    c.loot[k] = have - t;
+    renderLoot(c);
+  }
+  function takeAll(c){
+    if (!c) return;
+    ['wood','scrap','food'].forEach(k=>{
+      const have = c.loot[k]||0;
+      if (have>0) {
+        const t = addInv(k, have);
+        c.loot[k] = have - t;
+      }
+    });
+    renderLoot(c);
+  }
+
+  // 이동/카메라
   function move(dt){
+    if (S.uiLoot) return; // 루팅창 열려 있을 땐 이동 정지
     let ix=0, iy=0;
     if (key['w']||key['arrowup'])    iy-=1;
     if (key['s']||key['arrowdown'])  iy+=1;
@@ -257,6 +433,7 @@ export function start(canvas) {
     S.cam.y += (ty - S.cam.y)*Math.min(1, dt*4);
   }
 
+  // 실내 오버레이
   let fx=null, fxc=null;
   function drawOverlay(camX,camY){
     if (!S.inside) return;
@@ -268,7 +445,7 @@ export function start(canvas) {
 
     fxc.setTransform(1,0,0,1,0,0);
     fxc.clearRect(0,0,fw,fh);
-    fxc.filter='saturate(0.5) blur(1px)'; // 채도 0.5 + 약블러
+    fxc.filter='saturate(0.5) blur(1px)';
     fxc.drawImage(canvas,0,0,canvas.width,canvas.height,0,0,fw,fh);
 
     fxc.globalCompositeOperation='destination-out';
@@ -288,6 +465,7 @@ export function start(canvas) {
     ctx.restore();
   }
 
+  // 그리기
   function drawBG(){
     const W=canvas.width/(DPR*DRS), H=canvas.height/(DPR*DRS);
     const sx=Math.floor(S.cam.x/TILE)-2, sy=Math.floor(S.cam.y/TILE)-2;
@@ -325,6 +503,7 @@ export function start(canvas) {
         if(!has(gx-1,gy)){ ctx.moveTo(x-TILE/2+0.5,y-TILE/2+0.5); ctx.lineTo(x-TILE/2+0.5,y+TILE/2-0.5); }
         ctx.stroke();
       }
+      // 문
       for(const [kk,dv] of ch.doors){
         const x=dv.x, y=dv.y;
         if(dv.open){ ctx.fillStyle='#8b9ab0'; ctx.fillRect(x-TILE/2+2,y-TILE/2+2, TILE-4, TILE-4); }
@@ -333,6 +512,27 @@ export function start(canvas) {
           ctx.fillStyle='#b08a55';
           if(dv.dir==='h') ctx.fillRect(x-TILE/2+2,y-1,TILE-4,2);
           else             ctx.fillRect(x-1,y-TILE/2+2,2,TILE-4);
+        }
+      }
+    });
+  }
+  function drawContainers(){
+    forEachVisibleChunk(ch=>{
+      for(const c of ch.cont){
+        const x=c.x - TILE/2, y=c.y - TILE/2;
+        if(c.type==='box'){
+          ctx.fillStyle='#5a432a'; ctx.fillRect(x,y,TILE,TILE);
+          ctx.strokeStyle='#b48c58'; ctx.strokeRect(x+0.5,y+0.5,TILE-1,TILE-1);
+        } else if(c.type==='barrel'){
+          ctx.fillStyle='#444c55'; ctx.fillRect(x+2,y,12,TILE);
+          ctx.fillStyle='#8aa3b5'; ctx.fillRect(x+2,y+3,12,2); ctx.fillRect(x+2,y+TILE-5,12,2);
+        } else if(c.type==='scrap'){
+          ctx.fillStyle='#4b5560'; ctx.fillRect(x+3,y+6,10,6);
+        }
+        // 비어 있으면 흐림 처리
+        if(c.loot && (c.loot.wood|0)+(c.loot.scrap|0)+(c.loot.food|0)===0){
+          ctx.globalAlpha=.45; ctx.fillStyle='rgba(0,0,0,.15)';
+          ctx.fillRect(x,y,TILE,TILE); ctx.globalAlpha=1;
         }
       }
     });
@@ -357,6 +557,7 @@ export function start(canvas) {
       }
   }
 
+  // 루프
   let last=performance.now();
   function loop(n){
     const dt = Math.min(.05, (n-last)/1000); last=n;
@@ -386,9 +587,10 @@ export function start(canvas) {
     drawBG();
     drawFloors();
     drawWalls();
+    drawContainers();
     drawPlayer();
 
-    // 탐험 여부와 무관하게, 실내가 아닌 모든 실내에 덮개(벽과 동일 색)
+    // 실내 덮개(탐험 여부 무관) — 현재 실내 제외
     const cover = '#384050';
     forEachVisibleChunk(ch=>{
       for(const rm of ch.rooms){
